@@ -12,7 +12,7 @@ This package is structured as a pi extension package.
 ## Recommended verification
 
 ```bash
-pi install /Users/prince/github/extension/pi-skills-zh
+pi install /Users/prince/github/extension/pi-skill-manage
 /reload
 /skills-zh-status
 /skills-zh
