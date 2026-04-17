@@ -1,13 +1,20 @@
 {
-  "name": "pi-skills-zh",
+  "name": "pi-skill-manage",
   "version": "0.1.0",
-  "description": "Chinese translation and browsing extension for pi skills",
-  "keywords": ["pi-package", "pi-extension", "skills", "translation", "zh-cn"],
+  "description": "Manage, browse, and enrich pi skills",
+  "keywords": ["pi-package", "pi-extension", "skills", "skill-management", "translation", "zh-cn"],
   "license": "MIT",
   "type": "module",
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "scripts": {
+    "test": "vitest run"
   },
   "pi": {
     "extensions": ["./extensions"]

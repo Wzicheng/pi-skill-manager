@@ -4,20 +4,14 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-type CacheEntry = {
+export type CacheEntry = {
 	description_en: string;
 	description_zh: string;
 	path: string;
 	updatedAt: string;
 };
 
-type CacheFile = Record<string, CacheEntry>;
-
-type SkillCategory = {
-	key: string;
-	label: string;
-	keywords: string[];
-};
+export type CacheFile = Record<string, CacheEntry>;
 
 type RefreshState = {
 	running: boolean;
@@ -39,23 +33,26 @@ type FailureEntry = {
 	timestamp: string;
 };
 
+export type PackageGroup = {
+	key: string;
+	label: string;
+	skills: SlashCommandInfo[];
+};
+
+export type PackageSummary = {
+	key: string;
+	label: string;
+	total: number;
+	translated: number;
+	untranslated: number;
+	skills: SlashCommandInfo[];
+};
+
 const CACHE_PATH = path.join(os.homedir(), ".pi", "agent", "skill-translations.json");
 const ERROR_LOG_PATH = path.join(os.homedir(), ".pi", "agent", "skill-translations-last-errors.json");
 const STATUS_KEY = "skill-zh-helper";
 const DEFAULT_STATUS = "Skills-ZH 就绪";
 const TRANSLATION_TIMEOUT_MS = 30000;
-
-const CATEGORIES: SkillCategory[] = [
-	{ key: "git-pr", label: "Git / PR", keywords: ["git", "commit", "branch", "pr", "review thread", "pull request"] },
-	{ key: "planning", label: "计划 / 脑暴 / 需求", keywords: ["plan", "brainstorm", "requirements", "spec", "scope", "ideate"] },
-	{ key: "code-review", label: "代码审查", keywords: ["review", "reviewer", "audit", "correctness", "maintainability", "testing"] },
-	{ key: "frontend", label: "前端 / 设计 / 浏览器", keywords: ["frontend", "design", "figma", "browser", "ui", "screenshot", "css"] },
-	{ key: "security-reliability-performance", label: "安全 / 可靠性 / 性能", keywords: ["security", "reliability", "performance", "auth", "owasp", "failure"] },
-	{ key: "data", label: "数据 / 数据库 / 迁移", keywords: ["data", "database", "schema", "migration", "backfill", "sql"] },
-	{ key: "docs-research", label: "文档 / 研究 / Onboarding", keywords: ["document", "docs", "research", "onboarding", "readme", "proof"] },
-	{ key: "agent-pi", label: "Agent / Pi / 扩展", keywords: ["agent", "pi", "extension", "sdk", "mcp", "tool", "skill"] },
-	{ key: "other", label: "其他", keywords: [] },
-];
 
 export default function skillZhHelper(pi: ExtensionAPI) {
 	let refreshState: RefreshState = createIdleState();
@@ -65,7 +62,7 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("skills-zh", {
-		description: "按分类查看 skill 的中文说明；支持 refresh / all 子命令",
+		description: "按包查看 skill 的中文说明；支持 refresh / all / untranslated 子命令",
 		handler: async (args, ctx) => {
 			const raw = args.trim();
 			const [firstToken, ...restTokens] = raw.split(/\s+/).filter(Boolean);
@@ -87,25 +84,15 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 				return;
 			}
 
-			if (query) {
-				const matchedCategory = findCategory(query);
-				if (matchedCategory) {
-					await showCategorySkills(ctx, allSkills, cache, matchedCategory);
-					return;
-				}
+			if (query === "untranslated" || query === "pending" || query === "todo") {
+				await showUntranslatedPackages(ctx, allSkills, cache);
+				return;
+			}
 
+			if (query) {
 				const matchedSkills = getSkillCommands(pi, query);
 				if (matchedSkills.length === 0) {
-					const untranslated = allSkills.filter((skill) => !cache[toSkillKey(skill)]?.description_zh);
-					if (query === "untranslated" || query === "pending" || query === "todo") {
-						if (untranslated.length === 0) {
-							ctx.ui.notify("当前所有已注册 skills 都已有中文说明。", "info");
-							return;
-						}
-						await showSkillSelection(ctx, untranslated, cache, `未翻译 skills（${untranslated.length}）`);
-						return;
-					}
-					ctx.ui.notify(`未找到匹配的分类或 skill：${query}`, "warning");
+					ctx.ui.notify(`未找到匹配的 skill：${query}`, "warning");
 					return;
 				}
 
@@ -113,20 +100,7 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 				return;
 			}
 
-			const categorized = categorizeSkills(allSkills);
-			const categoryItems = categorized.map(({ category, skills }) => {
-				const translatedCount = skills.filter((skill) => cache[toSkillKey(skill)]?.description_zh).length;
-				return `${category.label}（${skills.length}）｜已翻译 ${translatedCount}`;
-			});
-
-			const selected = await ctx.ui.select("选择 skill 分类", categoryItems);
-			if (!selected) return;
-
-			const categoryLabel = selected.split("（")[0].trim();
-			const category = CATEGORIES.find((item) => item.label === categoryLabel);
-			if (!category) return;
-
-			await showCategorySkills(ctx, allSkills, cache, category);
+			await showPackageSelection(ctx, allSkills, cache);
 		},
 	});
 
@@ -139,9 +113,10 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 
 		const cache = await loadCache();
 		const lines: string[] = [];
-		for (const { category, skills: group } of categorizeSkills(skills)) {
-			lines.push(`--- ${category.label} (${group.length}) ---`);
-			for (const skill of group) {
+		for (const group of groupSkillsByPackage(skills)) {
+			const translatedCount = group.skills.filter((skill) => cache[toSkillKey(skill)]?.description_zh).length;
+			lines.push(`--- ${group.label} (${group.skills.length})｜已翻译 ${translatedCount} ---`);
+			for (const skill of group.skills) {
 				const zh = cache[toSkillKey(skill)]?.description_zh || "[未翻译]";
 				lines.push(`${formatSkillName(skill)}｜${zh}`);
 			}
@@ -178,12 +153,13 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("skills-zh-status", {
-		description: "查看当前翻译任务状态，以及整体翻译覆盖情况",
+		description: "查看当前翻译任务状态，以及按包组织的翻译覆盖情况",
 		handler: async (_args, ctx) => {
 			const cache = await loadCache();
 			const skills = getSkillCommands(pi);
 			const translated = skills.filter((skill) => cache[toSkillKey(skill)]?.description_zh).sort((a, b) => a.name.localeCompare(b.name));
 			const untranslated = skills.filter((skill) => !cache[toSkillKey(skill)]?.description_zh).sort((a, b) => a.name.localeCompare(b.name));
+			const packageSummary = summarizePackageCoverage(skills, cache);
 			const lines = [
 				formatRefreshState(refreshState),
 				"",
@@ -193,14 +169,19 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 				"统计范围: 当前 pi 已注册的 skill commands",
 			];
 
+			if (packageSummary.length > 0) {
+				lines.push("");
+				lines.push("按包统计:");
+				for (const item of packageSummary) {
+					lines.push(`- ${item.label}: ${item.translated}/${item.total}（未翻译 ${item.untranslated}）`);
+				}
+			}
+
 			if (untranslated.length > 0) {
 				lines.push("");
-				lines.push("未翻译 skills:");
-				for (const skill of untranslated.slice(0, 50)) {
-					lines.push(`- ${formatSkillName(skill)}`);
-				}
-				if (untranslated.length > 50) {
-					lines.push(`- ... 其余 ${untranslated.length - 50} 个未翻译 skill`);
+				lines.push("未翻译 package:");
+				for (const item of packageSummary.filter((entry) => entry.untranslated > 0)) {
+					lines.push(`- ${item.label}: ${item.untranslated}`);
 				}
 			}
 
@@ -341,15 +322,44 @@ export default function skillZhHelper(pi: ExtensionAPI) {
 	}
 }
 
-async function showCategorySkills(
+async function showPackageSelection(
 	ctx: { ui: { select(title: string, items: string[]): Promise<string | null> } },
 	allSkills: SlashCommandInfo[],
 	cache: CacheFile,
-	category: SkillCategory,
 ): Promise<void> {
-	const skills = categorizeSkills(allSkills).find((group) => group.category.key === category.key)?.skills ?? [];
-	if (skills.length === 0) return;
-	await showSkillSelection(ctx, skills, cache, `${category.label}（${skills.length}）`);
+	const packages = summarizePackageCoverage(allSkills, cache);
+	const items = packages.map((entry) => `${entry.label}（${entry.total}）｜已翻译 ${entry.translated}`);
+	const selected = await ctx.ui.select("选择 skill 包", items);
+	if (!selected) return;
+
+	const packageLabel = selected.split("（")[0].trim();
+	const selectedGroup = packages.find((entry) => entry.label === packageLabel);
+	if (!selectedGroup) return;
+
+	await showSkillSelection(ctx as any, selectedGroup.skills, cache, `${selectedGroup.label}（${selectedGroup.total}）`);
+}
+
+async function showUntranslatedPackages(
+	ctx: { ui: { select(title: string, items: string[]): Promise<string | null>; notify(message: string, level?: string): void } },
+	allSkills: SlashCommandInfo[],
+	cache: CacheFile,
+): Promise<void> {
+	const packages = summarizePackageCoverage(allSkills, cache).filter((entry) => entry.untranslated > 0);
+	if (packages.length === 0) {
+		ctx.ui.notify("当前所有已注册 skills 都已有中文说明。", "info");
+		return;
+	}
+
+	const items = packages.map((entry) => `${entry.label}（未翻译 ${entry.untranslated}/${entry.total}）`);
+	const selected = await ctx.ui.select("选择未翻译 skill 包", items);
+	if (!selected) return;
+
+	const packageLabel = selected.split("（")[0].trim();
+	const selectedGroup = packages.find((entry) => entry.label === packageLabel);
+	if (!selectedGroup) return;
+
+	const untranslatedSkills = selectedGroup.skills.filter((skill) => !cache[toSkillKey(skill)]?.description_zh);
+	await showSkillSelection(ctx, untranslatedSkills, cache, `${selectedGroup.label} 未翻译 skills（${untranslatedSkills.length}）`);
 }
 
 async function showSkillSelection(
@@ -379,10 +389,10 @@ function showSkillDetails(
 	cache: CacheFile,
 ): void {
 	const cached = cache[toSkillKey(skill)];
-	const category = getCategoryForSkill(skill).label;
+	const packageGroup = inferPackageGroup(skill);
 	const lines = [
 		`名称: ${formatSkillName(skill)}`,
-		`分类: ${category}`,
+		`包: ${packageGroup.label}`,
 		`英文说明: ${skill.description || "(无说明)"}`,
 		`中文说明: ${cached?.description_zh || "(尚未翻译，请先执行 /skills-zh refresh)"}`,
 		`路径: ${skill.sourceInfo.path}`,
@@ -390,40 +400,107 @@ function showSkillDetails(
 	ctx.ui.notify(lines.join("\n"), "info");
 }
 
-function categorizeSkills(skills: SlashCommandInfo[]): Array<{ category: SkillCategory; skills: SlashCommandInfo[] }> {
-	const groups = new Map<string, SlashCommandInfo[]>();
-	for (const category of CATEGORIES) groups.set(category.key, []);
-
+export function groupSkillsByPackage(skills: SlashCommandInfo[]): PackageGroup[] {
+	const groups = new Map<string, PackageGroup>();
 	for (const skill of skills) {
-		const category = getCategoryForSkill(skill);
-		groups.get(category.key)?.push(skill);
+		const inferred = inferPackageGroup(skill);
+		const existing = groups.get(inferred.key);
+		if (existing) {
+			existing.skills.push(skill);
+			continue;
+		}
+		groups.set(inferred.key, { ...inferred, skills: [skill] });
 	}
 
-	return CATEGORIES.map((category) => ({
-		category,
-		skills: (groups.get(category.key) || []).sort((a, b) => a.name.localeCompare(b.name)),
-	})).filter((group) => group.skills.length > 0);
+	return [...groups.values()]
+		.map((group) => ({
+			...group,
+			skills: [...group.skills].sort((a, b) => a.name.localeCompare(b.name)),
+		}))
+		.sort((a, b) => a.label.localeCompare(b.label));
 }
 
-function getCategoryForSkill(skill: SlashCommandInfo): SkillCategory {
-	const haystack = `${skill.name} ${(skill.description || "")}`.toLowerCase();
-	for (const category of CATEGORIES) {
-		if (category.key === "other") continue;
-		if (category.key === "git-pr" && /^skill:git-|^git-/.test(skill.name)) return category;
-		if (category.key === "planning" && /^(skill:)?ce-(brainstorm|plan|ideate)\b/.test(skill.name)) return category;
-		if (category.key === "frontend" && /^(skill:)?(frontend|design|figma|test-browser|gstack|agent-browser)\b/.test(skill.name)) return category;
-		if (category.key === "code-review" && /review/.test(skill.name)) return category;
-		if (category.keywords.some((keyword) => haystack.includes(keyword))) return category;
-	}
-	return CATEGORIES.find((category) => category.key === "other")!;
-}
-
-function findCategory(query: string): SkillCategory | undefined {
-	const normalized = query.trim().toLowerCase();
-	return CATEGORIES.find((category) => {
-		const label = category.label.toLowerCase();
-		return category.key === normalized || label.includes(normalized) || category.keywords.some((k) => k.includes(normalized));
+export function summarizePackageCoverage(skills: SlashCommandInfo[], cache: CacheFile): PackageSummary[] {
+	return groupSkillsByPackage(skills).map((group) => {
+		const translated = group.skills.filter((skill) => cache[toSkillKey(skill)]?.description_zh).length;
+		return {
+			key: group.key,
+			label: group.label,
+			total: group.skills.length,
+			translated,
+			untranslated: group.skills.length - translated,
+			skills: group.skills,
+		};
 	});
+}
+
+export function inferPackageGroup(skill: SlashCommandInfo): Omit<PackageGroup, "skills"> {
+	const sourcePath = skill.sourceInfo?.path || "";
+	const normalizedPath = normalizePath(sourcePath);
+	if (!normalizedPath) return { key: "other", label: "other" };
+
+	const known = inferKnownPackage(normalizedPath);
+	if (known) return known;
+
+	const heuristic = inferPackageFromPath(normalizedPath);
+	if (heuristic) return heuristic;
+
+	return { key: "other", label: "other" };
+}
+
+function inferKnownPackage(normalizedPath: string): Omit<PackageGroup, "skills"> | null {
+	if (/\/.pi\/agent\/skills\/ce-[^/]+\//.test(normalizedPath)) {
+		return { key: "ce", label: "CE skills" };
+	}
+
+	const skillMatch = normalizedPath.match(/\/.pi\/agent\/skills\/([^/]+)\//);
+	if (skillMatch?.[1]) {
+		return { key: slugify(skillMatch[1]), label: skillMatch[1] };
+	}
+
+	return null;
+}
+
+function inferPackageFromPath(normalizedPath: string): Omit<PackageGroup, "skills"> | null {
+	const segments = normalizedPath.split("/").filter(Boolean);
+	const ignored = new Set([
+		"users",
+		"user",
+		"prince",
+		".pi",
+		"agent",
+		"skills",
+		"extensions",
+		"src",
+		"dist",
+		"build",
+		"lib",
+		"tmp",
+		"var",
+		"private",
+	]);
+	const blacklist = new Set(["index.ts", "index.js", "skill.md", "readme.md"]);
+
+	for (let index = segments.length - 1; index >= 0; index -= 1) {
+		const segment = segments[index]!;
+		const lower = segment.toLowerCase();
+		if (blacklist.has(lower)) continue;
+		if (ignored.has(lower)) continue;
+		if (!/[a-z]/i.test(segment)) continue;
+		if (segment.length <= 2) continue;
+		if (segment.includes(".")) continue;
+		return { key: slugify(segment), label: segment };
+	}
+
+	return null;
+}
+
+function normalizePath(value: string): string {
+	return value.replace(/\\/g, "/").trim();
+}
+
+function slugify(value: string): string {
+	return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "other";
 }
 
 function getSkillCommands(pi: ExtensionAPI, filter = ""): SlashCommandInfo[] {
